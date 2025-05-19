@@ -1,70 +1,105 @@
+"""Gradio interface for Pix2Struct document question answering.
+
+Usage: ``python app.py``
 """
- collect user input: document and questions
-    - document: pdf, png, jpg, jpeg
-    - question: delineated by new line in the text box
-"""
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Generator, List, Tuple
+
 import gradio as gr
-import os
 
-def collect_inputs(file_obj, texts):
-    """
-    Process the uploaded file and questions.
-    """
+from doc_vqa import answer_questions, load_model
+
+from transformers import Pix2StructForConditionalGeneration, Pix2StructProcessor
+
+MODEL: Pix2StructForConditionalGeneration | None = None
+PROCESSOR: Pix2StructProcessor | None = None
+
+
+def collect_inputs(file_obj: gr.File, texts: str) -> Generator[Tuple[str, str], None, None]:
+    """Handle file upload and questions from the Gradio interface with logging."""
+    logs: List[str] = []
+
+    def log(message: str) -> str:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logs.append(f"[{timestamp}] {message}")
+        return "\n".join(logs)
+
     if file_obj is None:
-        return "Please upload a file first."
+        yield "", log("No file uploaded.")
+        return
 
-    # Get file extension
-    file_path = file_obj.name
-    file_ext = os.path.splitext(file_path)[1].lower()
+    file_path = Path(file_obj.name)
+    yield "", log(f"Uploaded file: {file_path.name}")
+    if file_path.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg"}:
+        yield "", log("Invalid file type. Please upload PDF or image.")
+        return
 
-    # Validate file type
-    allowed_extensions = ['.pdf', '.png', '.jpg', '.jpeg']
-    if file_ext not in allowed_extensions:
-        return f"Invalid file type. Please upload one of: {', '.join(allowed_extensions)}"
-
-    # Process questions
-    questions = [line.strip() for line in texts.splitlines() if line.strip()]
+    questions: List[str] = [line.strip() for line in texts.splitlines() if line.strip()]
+    yield "", log(f"Parsed {len(questions)} question(s)")
     if not questions:
-        return "Please enter at least one question."
+        yield "", log("No questions provided.")
+        return
 
-    # results = run_doc_vqa(file_path, questions, page_no=1)
-    # return "\n".join(f"{q}: {a}" for q, a in results)
+    global MODEL, PROCESSOR
+    if MODEL is None or PROCESSOR is None:
+        yield "", log("Loading DocVQA model…")
+        MODEL, PROCESSOR = load_model()
+        yield "", log("Model loaded")
 
-    return f"File uploaded: {file_path}\n\nQuestions:\n" + "\n".join(questions)
+    yield "", log("Running inference…")
+    results = answer_questions(str(file_path), questions, MODEL, PROCESSOR)
+    result_text = "\n".join(f"{q}: {a}" for q, a in results)
+    yield result_text, log("Inference complete")
 
 
-with gr.Blocks() as demo:
-    with gr.Tabs():
-        with gr.TabItem("Document QA"):
-            gr.Markdown("### 📄 Upload a file (PDF, PNG, or JPG):")
-            file_input = gr.File(
-                label="File Upload",
-                file_types=[".pdf", ".png", ".jpg", ".jpeg"],
-                type="filepath"
-            )
+def build_demo() -> gr.Blocks:
+    """Create and return the Gradio Blocks demo."""
+    with gr.Blocks() as demo:
+        with gr.Tabs():
+            with gr.TabItem("Document QA"):
+                gr.Markdown("### \U0001F4C4 Upload a file (PDF, PNG, or JPG):")
+                file_input = gr.File(
+                    label="File Upload",
+                    file_types=[".pdf", ".png", ".jpg", ".jpeg"],
+                    type="filepath",
+                )
 
-            gr.Markdown("### ❓ Enter your question(s), one per line:")
-            questions = gr.Textbox(
-                label="Questions",
-                placeholder="Type each question on its own line…",
-                lines=5,               # show 5 rows by default
-                max_lines=10          # allow up to 10 lines
-            )
-            submit = gr.Button("Submit")
-            output = gr.Textbox(label="Results", lines=10)
+                gr.Markdown("### \u2753 Enter your question(s), one per line:")
+                questions = gr.Textbox(
+                    label="Questions",
+                    placeholder="Type each question on its own line…",
+                    lines=5,
+                    max_lines=10,
+                )
+                submit = gr.Button("Submit")
+                output = gr.Textbox(label="Results", lines=10, show_copy_button=True)
 
-            submit.click(
-                fn=collect_inputs,
-                inputs=[file_input, questions],
-                outputs=output
-            )
-        
-        with gr.TabItem("Log"):
-            gr.Markdown("### 📝 Activity Log")
-            log_output = gr.Textbox(
-                label="Log",
-                lines=15,
-                interactive=False
-            )
+            with gr.TabItem("Log"):
+                gr.Markdown("### \U0001F4DD Activity Log")
+                log_output = gr.Textbox(
+                    label="Log",
+                    lines=15,
+                    interactive=False,
+                    show_copy_button=True,
+                )
 
-demo.launch()
+        submit.click(
+            fn=collect_inputs,
+            inputs=[file_input, questions],
+            outputs=[output, log_output],
+        )
+    return demo
+
+
+def main() -> None:
+    """Launch the Gradio demo."""
+    demo = build_demo()
+    demo.queue()
+    demo.launch()
+
+
+if __name__ == "__main__":
+    main()
